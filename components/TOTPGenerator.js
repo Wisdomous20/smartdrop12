@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import * as Crypto from 'expo-crypto';
+import * as totp from 'totp-generator'
 
 export const useTOTP = () => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -78,35 +79,14 @@ export const useTOTP = () => {
     return new Uint8Array(finalHash.match(/.{2}/g).map(byte => parseInt(byte, 16)));
   };
 
-  const generateTOTP = async (base32Key, timeStep = 30) => {
+  const generateTOTP = async (base32Key) => {
     setIsGenerating(true);
-    try {
-      if (!base32Key) return null;
-      
-      const keyBytes = base32Decode(base32Key);
-      const time = Math.floor(Date.now() / 1000 / timeStep);
-      
-      const timeBuffer = new Uint8Array(8);
-      const timeView = new DataView(timeBuffer.buffer);
-      timeView.setUint32(4, time, false);
-      
-      const hmacBytes = await generateHMAC(keyBytes, timeBuffer);
-      
-      const offset = hmacBytes[19] & 0xf;
-      const code = (
-        ((hmacBytes[offset] & 0x7f) << 24) |
-        ((hmacBytes[offset + 1] & 0xff) << 16) |
-        ((hmacBytes[offset + 2] & 0xff) << 8) |
-        (hmacBytes[offset + 3] & 0xff)
-      ) % 1000000;
-      
-      return code.toString().padStart(6, '0');
-    } catch (error) {
-      console.error('TOTP generation error:', error);
-      return null;
-    } finally {
-      setIsGenerating(false);
-    }
+    const { otp, expires } = totp.TOTP.generate(base32Key);
+
+    console.log(otp);
+
+    setIsGenerating(false);
+    return otp;
   };
 
   return { generateTOTP, isGenerating };

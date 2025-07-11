@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert, ScrollView, SafeAreaView, Dimensions, Modal } from 'react-native';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTOTP } from './components/TOTPGenerator';
 import { SMSService } from './components/SMSService';
 import ENV from './config/environment';
@@ -11,6 +11,8 @@ export default function App() {
   // Configuration States - Initialize with env vars if available
   const [semaphoreApiKey, setSemaphoreApiKey] = useState(ENV.SEMAPHORE_API_KEY || '');
   const [base32Key, setBase32Key] = useState(ENV.BASE32_SECRET_KEY || '');
+  const timer = useRef(null);
+  const [refresh, setRefresh] = useState(0);
   
   // SMS Provider Configuration
   const [smsProvider, setSmsProvider] = useState('mock'); // Default to mock for testing
@@ -77,21 +79,17 @@ export default function App() {
     const effectiveBase32Key = base32Key || ENV.BASE32_SECRET_KEY;
     if (!effectiveBase32Key.trim()) return;
 
-    const generateCurrentTOTP = async () => {
-      const code = await generateTOTP(effectiveBase32Key);
-      setCurrentTOTP(code);
-    };
-
-    generateCurrentTOTP();
-    const interval = setInterval(generateCurrentTOTP, 30000);
-    
-    return () => clearInterval(interval);
-  }, [isConfigured, base32Key]);
+    generateTOTP(effectiveBase32Key)
+      .then(k => {
+        setCurrentTOTP(k);
+      });
+  }, [isConfigured, base32Key, refresh]);
 
   // Countdown timer for TOTP
   useEffect(() => {
     const interval = setInterval(() => {
       const seconds = 30 - (Math.floor(Date.now() / 1000) % 30);
+      setRefresh(l => l + 1);
       setTOTPCountdown(seconds);
     }, 1000);
 
