@@ -2,25 +2,16 @@ import { StatusBar } from 'expo-status-bar';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, Alert, ScrollView, SafeAreaView, Dimensions, Modal } from 'react-native';
 import { useState, useEffect, useRef } from 'react';
 import { useTOTP } from './components/TOTPGenerator';
-import { SMSService } from './components/SMSService';
+import * as SMS from 'expo-sms';
 import ENV from './config/environment';
 
 const { width } = Dimensions.get('window');
 
 export default function App() {
   // Configuration States - Initialize with env vars if available
-  const [semaphoreApiKey, setSemaphoreApiKey] = useState(ENV.SEMAPHORE_API_KEY || '');
   const [base32Key, setBase32Key] = useState(ENV.BASE32_SECRET_KEY || '');
   const timer = useRef(null);
   const [refresh, setRefresh] = useState(0);
-  
-  // SMS Provider Configuration
-  const [smsProvider, setSmsProvider] = useState('mock'); // Default to mock for testing
-  const [smsConfig, setSmsConfig] = useState({
-    textbelt: { apiKey: 'textbelt' }, // Free tier
-    twilio: { accountSid: '', authToken: '', fromNumber: '' },
-    semaphore: { apiKey: semaphoreApiKey }
-  });
   
   // Delivery States
   const [smartBoxId, setSmartBoxId] = useState('SMARTBOX_001'); // Default box ID
@@ -48,29 +39,20 @@ export default function App() {
   });
 
   const { generateTOTP, isGenerating } = useTOTP();
-  const [smsTestResult, setSmsTestResult] = useState(null);
+  const [smsAvailable, setSmsAvailable] = useState(false);
 
-  // Check if system is configured
+  // Check if system is configured and SMS is available
   useEffect(() => {
-    let configured = false;
+    const checkConfiguration = async () => {
+      const configured = !!(base32Key || ENV.BASE32_SECRET_KEY);
+      const available = await SMS.isAvailableAsync();
+      
+      setIsConfigured(configured && available);
+      setSmsAvailable(available);
+    };
     
-    switch (smsProvider) {
-      case 'mock':
-        configured = !!(base32Key || ENV.BASE32_SECRET_KEY);
-        break;
-      case 'textbelt':
-        configured = !!(base32Key || ENV.BASE32_SECRET_KEY); // Textbelt works with free tier
-        break;
-      case 'semaphore':
-        configured = (semaphoreApiKey || ENV.SEMAPHORE_API_KEY) && 
-                    (base32Key || ENV.BASE32_SECRET_KEY);
-        break;
-      default:
-        configured = false;
-    }
-    
-    setIsConfigured(configured);
-  }, [smsProvider, semaphoreApiKey, base32Key, smsConfig]);
+    checkConfiguration();
+  }, [base32Key]);
 
   // Auto-generate TOTP every 30 seconds when configured
   useEffect(() => {
@@ -115,6 +97,24 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // Helper function to validate Philippine phone numbers
+  const validatePhoneNumber = (phone) => {
+    const phoneRegex = /^(09|\+639)\d{9}$/;
+    return phoneRegex.test(phone.replace(/\s/g, ''));
+  };
+
+  // Helper function to format Philippine phone numbers
+  const formatPhoneNumber = (phone) => {
+    const cleanPhone = phone.replace(/\s/g, '');
+    if (cleanPhone.startsWith('+63')) {
+      return cleanPhone;
+    }
+    if (cleanPhone.startsWith('09')) {
+      return '+63' + cleanPhone.slice(1);
+    }
+    return cleanPhone;
+  };
+
   const sendDeliveryCode = async () => {
     if (!isConfigured) {
       Alert.alert('System Not Configured', 'Please configure the system settings first.');
@@ -127,8 +127,13 @@ export default function App() {
       return;
     }
 
-    if (!SMSService.validatePhoneNumber(riderPhone)) {
+    if (!validatePhoneNumber(riderPhone)) {
       Alert.alert('Invalid Phone Number', 'Please enter a valid Philippine mobile number (e.g., 09123456789)');
+      return;
+    }
+
+    if (!smsAvailable) {
+      Alert.alert('SMS Not Available', 'SMS is not available on this device.');
       return;
     }
 
@@ -145,75 +150,58 @@ export default function App() {
       const message = customMessage.trim() || 
         `SmartDrop Delivery Code: ${totpCode}\n\nBox: ${smartBoxId}\nValid for 30 seconds.\n\nPresent this code to access your delivery.`;
       
-      // Get provider config
-      let providerConfig = smsConfig[smsProvider];
-      if (smsProvider === 'semaphore') {
-        providerConfig = { apiKey: semaphoreApiKey || ENV.SEMAPHORE_API_KEY };
+      const formattedPhone = formatPhoneNumber(riderPhone);
+      
+      console.log('Sending SMS via Expo SMS to:', formattedPhone);
+      
+      // Send SMS using Expo SMS
+      const result = await SMS.sendSMSAsync([formattedPhone], message);
+      
+      if (result.result === 'sent') {
+        const delivery = {
+          id: Date.now().toString(),
+          code: totpCode,
+          smartBoxId,
+          riderPhone: formattedPhone,
+          message,
+          timestamp: new Date().toISOString(),
+          messageId: 'expo_sms_' + Date.now(),
+          provider: 'expo-sms',
+          status: 'sent'
+        };
+        
+        setDeliveryHistory(prev => [delivery, ...prev.slice(0, 9)]);
+        
+        Alert.alert(
+          'SMS Sent!', 
+          `Access code sent to ${formattedPhone}\n\nThe rider can now access ${smartBoxId}`,
+          [{ text: 'OK', onPress: () => {
+            setCustomMessage('');
+            setRiderPhone('');
+          }}]
+        );
+      } else {
+        Alert.alert('SMS Cancelled', 'SMS sending was cancelled by the user.');
       }
-      
-      console.log('Attempting to send SMS via', smsProvider);
-      const smsResult = await SMSService.sendSMS(smsProvider, providerConfig, riderPhone, message);
-      
-      if (!smsResult.success) {
-        throw new Error(smsResult.error);
-      }
-      
-      const delivery = {
-        id: Date.now().toString(),
-        code: totpCode,
-        smartBoxId,
-        riderPhone: SMSService.formatPhoneNumber(riderPhone),
-        message,
-        timestamp: new Date().toISOString(),
-        messageId: smsResult.data.message_id,
-        provider: smsResult.data.provider,
-        status: 'sent'
-      };
-      
-      setDeliveryHistory(prev => [delivery, ...prev.slice(0, 9)]);
-      
-      Alert.alert(
-        'Delivery Code Sent!', 
-        `Access code sent to ${riderPhone} via ${smsProvider}\n\nThe rider can now access ${smartBoxId}\n\nMessage ID: ${smsResult.data.message_id}`,
-        [{ text: 'OK', onPress: () => {
-          setCustomMessage('');
-          setRiderPhone('');
-        }}]
-      );
       
     } catch (error) {
-      console.error('Delivery failed:', error);
-      Alert.alert('Delivery Failed', error.message);
+      console.error('SMS failed:', error);
+      Alert.alert('SMS Failed', error.message || 'An error occurred while sending SMS');
     } finally {
       setIsLoading(false);
     }
   };
 
   const testSMSConfiguration = async () => {
-    setSmsTestResult('Testing...');
-    
     try {
-      let config = smsConfig[smsProvider];
-      if (smsProvider === 'semaphore') {
-        config = { apiKey: semaphoreApiKey || ENV.SEMAPHORE_API_KEY };
-      }
-      
-      const result = await SMSService.testConfiguration(smsProvider, config);
-      
-      if (result.success) {
-        setSmsTestResult(`✅ ${smsProvider} configuration valid`);
-        let message = `${smsProvider} is configured correctly!`;
-        if (result.quotaRemaining !== undefined) {
-          message += `\nQuota remaining: ${result.quotaRemaining}`;
-        }
-        Alert.alert('SMS Configuration Test', message);
+      const available = await SMS.isAvailableAsync();
+      if (available) {
+        Alert.alert('SMS Test', 'SMS is available on this device and ready to use!');
       } else {
-        setSmsTestResult(`❌ ${smsProvider} configuration failed`);
-        Alert.alert('SMS Configuration Test', `Failed: ${result.message}`);
+        Alert.alert('SMS Test', 'SMS is not available on this device.');
       }
     } catch (error) {
-      setSmsTestResult('❌ Test failed');
-      Alert.alert('SMS Configuration Test', `Error: ${error.message}`);
+      Alert.alert('SMS Test', `Error checking SMS availability: ${error.message}`);
     }
   };
 
@@ -395,84 +383,18 @@ export default function App() {
             </View>
 
             <View style={styles.configSection}>
-              <Text style={styles.configLabel}>SMS Provider</Text>
+              <Text style={styles.configLabel}>SMS Configuration</Text>
               
-              {/* Provider Selection */}
-              <View style={styles.providerContainer}>
-                {['mock', 'textbelt', 'semaphore'].map((provider) => (
-                  <TouchableOpacity
-                    key={provider}
-                    style={[
-                      styles.providerButton,
-                      smsProvider === provider && styles.providerButtonActive
-                    ]}
-                    onPress={() => setSmsProvider(provider)}
-                  >
-                    <Text style={[
-                      styles.providerButtonText,
-                      smsProvider === provider && styles.providerButtonTextActive
-                    ]}>
-                      {provider.charAt(0).toUpperCase() + provider.slice(1)}
-                      {provider === 'mock' && ' (Testing)'}
-                      {provider === 'textbelt' && ' (Free)'}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-
-              {/* Provider-specific configuration */}
-              {smsProvider === 'semaphore' && (
-                <TextInput
-                  style={styles.input}
-                  placeholder="Semaphore API Key"
-                  value={semaphoreApiKey}
-                  onChangeText={setSemaphoreApiKey}
-                  secureTextEntry={true}
-                  placeholderTextColor="#999"
-                />
-              )}
-
-              {smsProvider === 'textbelt' && (
-                <View>
-                  <Text style={styles.providerNote}>
-                    📱 Textbelt provides 1 free SMS per day. For more, get an API key from textbelt.com
-                  </Text>
-                  <TextInput
-                    style={styles.input}
-                    placeholder="Textbelt API Key (optional - leave empty for free tier)"
-                    value={smsConfig.textbelt.apiKey}
-                    onChangeText={(value) => 
-                      setSmsConfig(prev => ({
-                        ...prev,
-                        textbelt: { ...prev.textbelt, apiKey: value || 'textbelt' }
-                      }))
-                    }
-                    placeholderTextColor="#999"
-                  />
-                </View>
-              )}
-
-              {smsProvider === 'mock' && (
-                <Text style={styles.providerNote}>
-                  🧪 Mock service simulates SMS sending for testing. Check console for "sent" messages.
-                </Text>
-              )}
+              <Text style={styles.providerNote}>
+                📱 Using Expo SMS - Opens device's SMS app for manual sending
+              </Text>
               
               <TouchableOpacity 
                 style={[styles.testButton]}
                 onPress={testSMSConfiguration}
               >
-                <Text style={styles.testButtonText}>Test {smsProvider} Configuration</Text>
+                <Text style={styles.testButtonText}>Test SMS Configuration</Text>
               </TouchableOpacity>
-              
-              {smsTestResult && (
-                <Text style={[
-                  styles.testResult,
-                  { color: smsTestResult.includes('✅') ? '#4CAF50' : '#f44336' }
-                ]}>
-                  {smsTestResult}
-                </Text>
-              )}
             </View>
 
             <View style={styles.configSection}>
@@ -795,31 +717,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 8,
     fontWeight: '500',
-  },
-  providerContainer: {
-    flexDirection: 'row',
-    marginBottom: 16,
-  },
-  providerButton: {
-    flex: 1,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#ddd',
-    borderRadius: 6,
-    marginHorizontal: 2,
-    alignItems: 'center',
-  },
-  providerButtonActive: {
-    backgroundColor: '#2196F3',
-    borderColor: '#2196F3',
-  },
-  providerButtonText: {
-    fontSize: 12,
-    color: '#666',
-    fontWeight: '500',
-  },
-  providerButtonTextActive: {
-    color: '#fff',
   },
   providerNote: {
     fontSize: 12,
